@@ -1276,12 +1276,12 @@ int bond_alb_initialize(struct bonding *bond, int rlb_enabled)
 		return res;
 
 	if (rlb_enabled) {
+		bond->alb_info.rlb_enabled = 1;
 		res = rlb_initialize(bond);
 		if (res) {
 			tlb_deinitialize(bond);
 			return res;
 		}
-		bond->alb_info.rlb_enabled = 1;
 	} else {
 		bond->alb_info.rlb_enabled = 0;
 	}
@@ -1360,7 +1360,7 @@ netdev_tx_t bond_tlb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 				struct bond_up_slave *slaves;
 				unsigned int count;
 
-				slaves = rcu_dereference(bond->usable_slaves);
+				slaves = rcu_dereference(bond->slave_arr);
 				count = slaves ? READ_ONCE(slaves->count) : 0;
 				if (likely(count))
 					tx_slave = slaves->arr[hash_index %
@@ -1494,7 +1494,7 @@ netdev_tx_t bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 			struct bond_up_slave *slaves;
 			unsigned int count;
 
-			slaves = rcu_dereference(bond->usable_slaves);
+			slaves = rcu_dereference(bond->slave_arr);
 			count = slaves ? READ_ONCE(slaves->count) : 0;
 			if (likely(count))
 				tx_slave = slaves->arr[bond_xmit_hash(bond, skb) %
@@ -1514,14 +1514,14 @@ void bond_alb_monitor(struct work_struct *work)
 	struct slave *slave;
 
 	if (!bond_has_slaves(bond)) {
-		atomic_set(&bond_info->tx_rebalance_counter, 0);
+		bond_info->tx_rebalance_counter = 0;
 		bond_info->lp_counter = 0;
 		goto re_arm;
 	}
 
 	rcu_read_lock();
 
-	atomic_inc(&bond_info->tx_rebalance_counter);
+	bond_info->tx_rebalance_counter++;
 	bond_info->lp_counter++;
 
 	/* send learning packets */
@@ -1543,7 +1543,7 @@ void bond_alb_monitor(struct work_struct *work)
 	}
 
 	/* rebalance tx traffic */
-	if (atomic_read(&bond_info->tx_rebalance_counter) >= BOND_TLB_REBALANCE_TICKS) {
+	if (bond_info->tx_rebalance_counter >= BOND_TLB_REBALANCE_TICKS) {
 		bond_for_each_slave_rcu(bond, slave, iter) {
 			tlb_clear_slave(bond, slave, 1);
 			if (slave == rcu_access_pointer(bond->curr_active_slave)) {
@@ -1553,7 +1553,7 @@ void bond_alb_monitor(struct work_struct *work)
 				bond_info->unbalanced_load = 0;
 			}
 		}
-		atomic_set(&bond_info->tx_rebalance_counter, 0);
+		bond_info->tx_rebalance_counter = 0;
 	}
 
 	if (bond_info->rlb_enabled) {
@@ -1623,8 +1623,7 @@ int bond_alb_init_slave(struct bonding *bond, struct slave *slave)
 	tlb_init_slave(slave);
 
 	/* order a rebalance ASAP */
-	atomic_set(&bond->alb_info.tx_rebalance_counter,
-		   BOND_TLB_REBALANCE_TICKS);
+	bond->alb_info.tx_rebalance_counter = BOND_TLB_REBALANCE_TICKS;
 
 	if (bond->alb_info.rlb_enabled)
 		bond->alb_info.rlb_rebalance = 1;
@@ -1661,8 +1660,7 @@ void bond_alb_handle_link_change(struct bonding *bond, struct slave *slave, char
 			rlb_clear_slave(bond, slave);
 	} else if (link == BOND_LINK_UP) {
 		/* order a rebalance ASAP */
-		atomic_set(&bond_info->tx_rebalance_counter,
-			   BOND_TLB_REBALANCE_TICKS);
+		bond_info->tx_rebalance_counter = BOND_TLB_REBALANCE_TICKS;
 		if (bond->alb_info.rlb_enabled) {
 			bond->alb_info.rlb_rebalance = 1;
 			/* If the updelay module parameter is smaller than the

@@ -2626,6 +2626,7 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 	struct device_node *node = pdev->dev.of_node;
 	struct xilinx_dma_device *xdev;
 	struct device_node *child, *np = pdev->dev.of_node;
+	struct resource *io;
 	u32 num_frames, addr_width, len_width;
 	int i, err;
 
@@ -2651,11 +2652,11 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 		return err;
 
 	/* Request and map I/O memory */
-	xdev->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(xdev->regs)) {
-		err = PTR_ERR(xdev->regs);
-		goto disable_clks;
-	}
+	io = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	xdev->regs = devm_ioremap_resource(&pdev->dev, io);
+	if (IS_ERR(xdev->regs))
+		return PTR_ERR(xdev->regs);
+
 	/* Retrieve the DMA engine properties from the device tree */
 	xdev->max_buffer_len = GENMASK(XILINX_DMA_MAX_TRANS_LEN_MAX - 1, 0);
 
@@ -2682,7 +2683,7 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 		if (err < 0) {
 			dev_err(xdev->dev,
 				"missing xlnx,num-fstores property\n");
-			goto disable_clks;
+			return err;
 		}
 
 		err = of_property_read_u32(node, "xlnx,flush-fsync",
@@ -2702,11 +2703,7 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 		xdev->ext_addr = false;
 
 	/* Set the dma mask bits */
-	err = dma_set_mask_and_coherent(xdev->dev, DMA_BIT_MASK(addr_width));
-	if (err < 0) {
-		dev_err(xdev->dev, "DMA mask error %d\n", err);
-		goto disable_clks;
-	}
+	dma_set_mask(xdev->dev, DMA_BIT_MASK(addr_width));
 
 	/* Initialize the DMA engine */
 	xdev->common.dev = &pdev->dev;
@@ -2747,10 +2744,8 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 	/* Initialize the channels */
 	for_each_child_of_node(node, child) {
 		err = xilinx_dma_child_probe(xdev, child);
-		if (err < 0) {
-			of_node_put(child);
-			goto error;
-		}
+		if (err < 0)
+			goto disable_clks;
 	}
 
 	if (xdev->dma_config->dmatype == XDMA_TYPE_VDMA) {
@@ -2783,12 +2778,12 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 
 	return 0;
 
+disable_clks:
+	xdma_disable_allclks(xdev);
 error:
 	for (i = 0; i < xdev->nr_channels; i++)
 		if (xdev->chan[i])
 			xilinx_dma_chan_remove(xdev->chan[i]);
-disable_clks:
-	xdma_disable_allclks(xdev);
 
 	return err;
 }

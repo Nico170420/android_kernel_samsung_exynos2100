@@ -11,8 +11,8 @@
  * Copyright 2002 MontaVista Software Inc.
  */
 
-#define pr_fmt(fmt) "IPMI message handler: " fmt
-#define dev_fmt(fmt) pr_fmt(fmt)
+#define pr_fmt(fmt) "%s" fmt, "IPMI message handler: "
+#define dev_fmt pr_fmt
 
 #include <linux/module.h>
 #include <linux/errno.h>
@@ -219,8 +219,6 @@ struct ipmi_user {
 	/* Free must run in process context for RCU cleanup. */
 	struct work_struct remove_work;
 };
-
-static struct workqueue_struct *remove_work_wq;
 
 static struct ipmi_user *acquire_ipmi_user(struct ipmi_user *user, int *index)
 	__acquires(user->release_barrier)
@@ -1288,7 +1286,7 @@ static void free_user(struct kref *ref)
 	struct ipmi_user *user = container_of(ref, struct ipmi_user, refcount);
 
 	/* SRCU cleanup must happen in task context. */
-	queue_work(remove_work_wq, &user->remove_work);
+	schedule_work(&user->remove_work);
 }
 
 static void _ipmi_destroy_user(struct ipmi_user *user)
@@ -1298,7 +1296,6 @@ static void _ipmi_destroy_user(struct ipmi_user *user)
 	unsigned long    flags;
 	struct cmd_rcvr  *rcvr;
 	struct cmd_rcvr  *rcvrs = NULL;
-	struct module    *owner;
 
 	if (!acquire_ipmi_user(user, &i)) {
 		/*
@@ -1359,9 +1356,8 @@ static void _ipmi_destroy_user(struct ipmi_user *user)
 		kfree(rcvr);
 	}
 
-	owner = intf->owner;
 	kref_put(&intf->refcount, intf_free);
-	module_put(owner);
+	module_put(intf->owner);
 }
 
 int ipmi_destroy_user(struct ipmi_user *user)
@@ -2940,7 +2936,7 @@ cleanup_bmc_device(struct kref *ref)
 	 * with removing the device attributes while reading a device
 	 * attribute.
 	 */
-	queue_work(remove_work_wq, &bmc->remove_work);
+	schedule_work(&bmc->remove_work);
 }
 
 /*
@@ -3537,16 +3533,12 @@ static void deliver_smi_err_response(struct ipmi_smi *intf,
 				     struct ipmi_smi_msg *msg,
 				     unsigned char err)
 {
-	int rv;
 	msg->rsp[0] = msg->data[0] | 4;
 	msg->rsp[1] = msg->data[1];
 	msg->rsp[2] = err;
 	msg->rsp_size = 3;
-
-	/* This will never requeue, but it may ask us to free the message. */
-	rv = handle_one_recv_msg(intf, msg);
-	if (rv == 0)
-		ipmi_free_smi_msg(msg);
+	/* It's an error, so it will never requeue, no need to check return. */
+	handle_one_recv_msg(intf, msg);
 }
 
 static void cleanup_smi_msgs(struct ipmi_smi *intf)
@@ -4805,9 +4797,7 @@ static atomic_t recv_msg_inuse_count = ATOMIC_INIT(0);
 static void free_smi_msg(struct ipmi_smi_msg *msg)
 {
 	atomic_dec(&smi_msg_inuse_count);
-	/* Try to keep as much stuff out of the panic path as possible. */
-	if (!oops_in_progress)
-		kfree(msg);
+	kfree(msg);
 }
 
 struct ipmi_smi_msg *ipmi_alloc_smi_msg(void)
@@ -4826,9 +4816,7 @@ EXPORT_SYMBOL(ipmi_alloc_smi_msg);
 static void free_recv_msg(struct ipmi_recv_msg *msg)
 {
 	atomic_dec(&recv_msg_inuse_count);
-	/* Try to keep as much stuff out of the panic path as possible. */
-	if (!oops_in_progress)
-		kfree(msg);
+	kfree(msg);
 }
 
 static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void)
@@ -4846,7 +4834,7 @@ static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void)
 
 void ipmi_free_recv_msg(struct ipmi_recv_msg *msg)
 {
-	if (msg->user && !oops_in_progress)
+	if (msg->user)
 		kref_put(&msg->user->refcount, free_user);
 	msg->done(msg);
 }
@@ -5162,16 +5150,7 @@ static int ipmi_init_msghandler(void)
 	if (initialized)
 		goto out;
 
-	rv = init_srcu_struct(&ipmi_interfaces_srcu);
-	if (rv)
-		goto out;
-
-	remove_work_wq = create_singlethread_workqueue("ipmi-msghandler-remove-wq");
-	if (!remove_work_wq) {
-		pr_err("unable to create ipmi-msghandler-remove-wq workqueue");
-		rv = -ENOMEM;
-		goto out_wq;
-	}
+	init_srcu_struct(&ipmi_interfaces_srcu);
 
 	timer_setup(&ipmi_timer, ipmi_timeout, 0);
 	mod_timer(&ipmi_timer, jiffies + IPMI_TIMEOUT_JIFFIES);
@@ -5180,9 +5159,6 @@ static int ipmi_init_msghandler(void)
 
 	initialized = true;
 
-out_wq:
-	if (rv)
-		cleanup_srcu_struct(&ipmi_interfaces_srcu);
 out:
 	mutex_unlock(&ipmi_interfaces_mutex);
 	return rv;
@@ -5206,8 +5182,6 @@ static void __exit cleanup_ipmi(void)
 	int count;
 
 	if (initialized) {
-		destroy_workqueue(remove_work_wq);
-
 		atomic_notifier_chain_unregister(&panic_notifier_list,
 						 &panic_block);
 

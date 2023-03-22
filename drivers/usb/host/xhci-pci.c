@@ -15,6 +15,7 @@
 
 #include "xhci.h"
 #include "xhci-trace.h"
+#include "xhci-pci.h"
 
 #define SSIC_PORT_NUM		2
 #define SSIC_PORT_CFG2		0x880c
@@ -28,7 +29,6 @@
 #define PCI_VENDOR_ID_FRESCO_LOGIC	0x1b73
 #define PCI_DEVICE_ID_FRESCO_LOGIC_PDK	0x1000
 #define PCI_DEVICE_ID_FRESCO_LOGIC_FL1009	0x1009
-#define PCI_DEVICE_ID_FRESCO_LOGIC_FL1100	0x1100
 #define PCI_DEVICE_ID_FRESCO_LOGIC_FL1400	0x1400
 
 #define PCI_VENDOR_ID_ETRON		0x1b6f
@@ -59,15 +59,6 @@
 #define PCI_DEVICE_ID_AMD_PROMONTORYA_3			0x43ba
 #define PCI_DEVICE_ID_AMD_PROMONTORYA_2			0x43bb
 #define PCI_DEVICE_ID_AMD_PROMONTORYA_1			0x43bc
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_1		0x161a
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_2		0x161b
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_3		0x161d
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_4		0x161e
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_5		0x15d6
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_6		0x15d7
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_7		0x161c
-#define PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_8		0x161f
-
 #define PCI_DEVICE_ID_ASMEDIA_1042_XHCI			0x1042
 #define PCI_DEVICE_ID_ASMEDIA_1042A_XHCI		0x1142
 #define PCI_DEVICE_ID_ASMEDIA_1142_XHCI			0x1242
@@ -78,13 +69,8 @@ static const char hcd_name[] = "xhci_hcd";
 
 static struct hc_driver __read_mostly xhci_pci_hc_driver;
 
-static int xhci_pci_setup(struct usb_hcd *hcd);
-static int xhci_pci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
-				      struct usb_tt *tt, gfp_t mem_flags);
-
 static const struct xhci_driver_overrides xhci_pci_overrides __initconst = {
 	.reset = xhci_pci_setup,
-	.update_hub_device = xhci_pci_update_hub_device,
 };
 
 /* called after powerup, by probe or system-pm "wakeup" */
@@ -144,10 +130,6 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 	if (pdev->vendor == PCI_VENDOR_ID_FRESCO_LOGIC &&
 			pdev->device == PCI_DEVICE_ID_FRESCO_LOGIC_FL1009)
 		xhci->quirks |= XHCI_BROKEN_STREAMS;
-
-	if (pdev->vendor == PCI_VENDOR_ID_FRESCO_LOGIC &&
-			pdev->device == PCI_DEVICE_ID_FRESCO_LOGIC_FL1100)
-		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
 
 	if (pdev->vendor == PCI_VENDOR_ID_NEC)
 		xhci->quirks |= XHCI_NEC_HOST;
@@ -275,14 +257,8 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 		xhci->quirks |= XHCI_BROKEN_STREAMS;
 
 	if (pdev->vendor == PCI_VENDOR_ID_ASMEDIA &&
-		pdev->device == PCI_DEVICE_ID_ASMEDIA_1042_XHCI) {
-		/*
-		 * try to tame the ASMedia 1042 controller which reports 0.96
-		 * but appears to behave more like 1.0
-		 */
-		xhci->quirks |= XHCI_SPURIOUS_SUCCESS;
+		pdev->device == PCI_DEVICE_ID_ASMEDIA_1042_XHCI)
 		xhci->quirks |= XHCI_BROKEN_STREAMS;
-	}
 	if (pdev->vendor == PCI_VENDOR_ID_ASMEDIA &&
 		pdev->device == PCI_DEVICE_ID_ASMEDIA_1042A_XHCI) {
 		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
@@ -311,17 +287,6 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 	     pdev->device == PCI_DEVICE_ID_AMD_PROMONTORYA_4))
 		xhci->quirks |= XHCI_NO_SOFT_RETRY;
 
-	if (pdev->vendor == PCI_VENDOR_ID_AMD &&
-	    (pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_1 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_2 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_3 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_4 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_5 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_6 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_7 ||
-	    pdev->device == PCI_DEVICE_ID_AMD_YELLOW_CARP_XHCI_8))
-		xhci->quirks |= XHCI_DEFAULT_PM_RUNTIME_ALLOW;
-
 	if (xhci->quirks & XHCI_RESET_ON_RESUME)
 		xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
 				"QUIRK: Resetting on resume");
@@ -339,42 +304,12 @@ static void xhci_pme_acpi_rtd3_enable(struct pci_dev *dev)
 				NULL);
 	ACPI_FREE(obj);
 }
-
-static void xhci_find_lpm_incapable_ports(struct usb_hcd *hcd, struct usb_device *hdev)
-{
-	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
-	struct xhci_hub *rhub = &xhci->usb3_rhub;
-	int ret;
-	int i;
-
-	/* This is not the usb3 roothub we are looking for */
-	if (hcd != rhub->hcd)
-		return;
-
-	if (hdev->maxchild > rhub->num_ports) {
-		dev_err(&hdev->dev, "USB3 roothub port number mismatch\n");
-		return;
-	}
-
-	for (i = 0; i < hdev->maxchild; i++) {
-		ret = usb_acpi_port_lpm_incapable(hdev, i);
-
-		dev_dbg(&hdev->dev, "port-%d disable U1/U2 _DSM: %d\n", i + 1, ret);
-
-		if (ret >= 0) {
-			rhub->ports[i]->lpm_incapable = ret;
-			continue;
-		}
-	}
-}
-
 #else
 static void xhci_pme_acpi_rtd3_enable(struct pci_dev *dev) { }
-static void xhci_find_lpm_incapable_ports(struct usb_hcd *hcd, struct usb_device *hdev) { }
 #endif /* CONFIG_ACPI */
 
 /* called during probe() after chip reset completes */
-static int xhci_pci_setup(struct usb_hcd *hcd)
+int xhci_pci_setup(struct usb_hcd *hcd)
 {
 	struct xhci_hcd		*xhci;
 	struct pci_dev		*pdev = to_pci_dev(hcd->self.controller);
@@ -402,22 +337,13 @@ static int xhci_pci_setup(struct usb_hcd *hcd)
 	/* Find any debug ports */
 	return xhci_pci_reinit(xhci, pdev);
 }
-
-static int xhci_pci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
-				      struct usb_tt *tt, gfp_t mem_flags)
-{
-	/* Check if acpi claims some USB3 roothub ports are lpm incapable */
-	if (!hdev->parent)
-		xhci_find_lpm_incapable_ports(hcd, hdev);
-
-	return xhci_update_hub_device(hcd, hdev, tt, mem_flags);
-}
+EXPORT_SYMBOL_GPL(xhci_pci_setup);
 
 /*
  * We need to register our own PCI probe function (instead of the USB core's
  * function) in order to create a second roothub under xHCI.
  */
-static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	int retval;
 	struct xhci_hcd *xhci;
@@ -470,8 +396,6 @@ static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (xhci->quirks & XHCI_DEFAULT_PM_RUNTIME_ALLOW)
 		pm_runtime_allow(&dev->dev);
 
-	dma_set_max_seg_size(&dev->dev, UINT_MAX);
-
 	return 0;
 
 put_usb3_hcd:
@@ -482,8 +406,9 @@ put_runtime_pm:
 	pm_runtime_put_noidle(&dev->dev);
 	return retval;
 }
+EXPORT_SYMBOL_GPL(xhci_pci_probe);
 
-static void xhci_pci_remove(struct pci_dev *dev)
+void xhci_pci_remove(struct pci_dev *dev)
 {
 	struct xhci_hcd *xhci;
 
@@ -505,6 +430,7 @@ static void xhci_pci_remove(struct pci_dev *dev)
 
 	usb_hcd_pci_remove(dev);
 }
+EXPORT_SYMBOL_GPL(xhci_pci_remove);
 
 #ifdef CONFIG_PM
 /*
@@ -570,7 +496,7 @@ static void xhci_sparse_control_quirk(struct usb_hcd *hcd)
 	writel(reg, hcd->regs + SPARSE_CNTL_ENABLE);
 }
 
-static int xhci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
+int xhci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
 {
 	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
 	struct pci_dev		*pdev = to_pci_dev(hcd->self.controller);
@@ -598,8 +524,9 @@ static int xhci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(xhci_pci_suspend);
 
-static int xhci_pci_resume(struct usb_hcd *hcd, bool hibernated)
+int xhci_pci_resume(struct usb_hcd *hcd, bool hibernated)
 {
 	struct xhci_hcd		*xhci = hcd_to_xhci(hcd);
 	struct pci_dev		*pdev = to_pci_dev(hcd->self.controller);
@@ -647,6 +574,7 @@ static void xhci_pci_shutdown(struct usb_hcd *hcd)
 	if (xhci->quirks & XHCI_SPURIOUS_WAKEUP)
 		pci_set_power_state(pdev, PCI_D3hot);
 }
+EXPORT_SYMBOL_GPL(xhci_pci_resume);
 #endif /* CONFIG_PM */
 
 /*-------------------------------------------------------------------------*/

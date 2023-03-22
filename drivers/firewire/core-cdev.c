@@ -818,10 +818,8 @@ static int ioctl_send_response(struct client *client, union ioctl_arg *arg)
 
 	r = container_of(resource, struct inbound_transaction_resource,
 			 resource);
-	if (is_fcp_request(r->request)) {
-		kfree(r->data);
+	if (is_fcp_request(r->request))
 		goto out;
-	}
 
 	if (a->length != fw_get_response_length(r->request)) {
 		ret = -EINVAL;
@@ -1484,7 +1482,6 @@ static void outbound_phy_packet_callback(struct fw_packet *packet,
 {
 	struct outbound_phy_packet_event *e =
 		container_of(packet, struct outbound_phy_packet_event, p);
-	struct client *e_client;
 
 	switch (status) {
 	/* expected: */
@@ -1501,10 +1498,9 @@ static void outbound_phy_packet_callback(struct fw_packet *packet,
 	}
 	e->phy_packet.data[0] = packet->timestamp;
 
-	e_client = e->client;
 	queue_event(e->client, &e->event, &e->phy_packet,
 		    sizeof(e->phy_packet) + e->phy_packet.length, NULL, 0);
-	client_put(e_client);
+	client_put(e->client);
 }
 
 static int ioctl_send_phy_packet(struct client *client, union ioctl_arg *arg)

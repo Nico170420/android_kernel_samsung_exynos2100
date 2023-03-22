@@ -126,7 +126,7 @@ int typec_altmode_exit(struct typec_altmode *adev)
 	if (!adev || !adev->active)
 		return 0;
 
-	if (!pdev->ops || !pdev->ops->exit)
+	if (!pdev->ops || !pdev->ops->enter)
 		return -EOPNOTSUPP;
 
 	/* Moving to USB Safe State */
@@ -356,6 +356,8 @@ static int typec_probe(struct device *dev)
 	struct typec_altmode *adev = to_typec_altmode(dev);
 	struct altmode *altmode = to_altmode(adev);
 	int ret;
+
+	pr_info("%s\n", __func__);
 
 	/* Fail if the port does not support the alternate mode */
 	if (!altmode->partner)
