@@ -15,8 +15,6 @@
 /* Handle ro_after_init data on our own. */
 #define RO_AFTER_INIT_DATA
 
-#define RUNTIME_DISCARD_EXIT
-
 #include <asm-generic/vmlinux.lds.h>
 #include <asm/vmlinux.lds.h>
 
@@ -126,7 +124,6 @@ SECTIONS
 	/*
 	 * Table with the patch locations to undo expolines
 	*/
-	. = ALIGN(4);
 	.nospec_call_table : {
 		__nospec_call_start = . ;
 		*(.s390_indirect*)
@@ -191,6 +188,5 @@ SECTIONS
 	DISCARDS
 	/DISCARD/ : {
 		*(.eh_frame)
-		*(.interp)
 	}
 }

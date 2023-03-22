@@ -85,7 +85,7 @@ void die_if_kernel(char *str, struct pt_regs *regs, int nr)
 	pr_err("%s: %08x\n", str, nr);
 	show_regs(regs);
 	add_taint(TAINT_DIE, LOCKDEP_NOW_UNRELIABLE);
-	make_task_dead(SIGSEGV);
+	do_exit(SIGSEGV);
 }
 
 void buserr(struct pt_regs *regs)
