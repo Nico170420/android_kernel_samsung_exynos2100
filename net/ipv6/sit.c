@@ -310,7 +310,9 @@ static int ipip6_tunnel_get_prl(struct ip_tunnel *t,
 		kcalloc(cmax, sizeof(*kp), GFP_KERNEL | __GFP_NOWARN) :
 		NULL;
 
-	ca = min(t->prl_count, cmax);
+	rcu_read_lock();
+
+	ca = t->prl_count < cmax ? t->prl_count : cmax;
 
 	if (!kp) {
 		/* We don't try hard to allocate much memory for
@@ -325,7 +327,7 @@ static int ipip6_tunnel_get_prl(struct ip_tunnel *t,
 		}
 	}
 
-	rcu_read_lock();
+	c = 0;
 	for_each_prl_rcu(t->prl) {
 		if (c >= cmax)
 			break;
@@ -337,7 +339,7 @@ static int ipip6_tunnel_get_prl(struct ip_tunnel *t,
 		if (kprl.addr != htonl(INADDR_ANY))
 			break;
 	}
-
+out:
 	rcu_read_unlock();
 
 	len = sizeof(*kp) * c;
@@ -346,7 +348,7 @@ static int ipip6_tunnel_get_prl(struct ip_tunnel *t,
 		ret = -EFAULT;
 
 	kfree(kp);
-out:
+
 	return ret;
 }
 
@@ -1083,12 +1085,10 @@ static void ipip6_tunnel_bind_dev(struct net_device *dev)
 
 	if (tdev && !netif_is_l3_master(tdev)) {
 		int t_hlen = tunnel->hlen + sizeof(struct iphdr);
-		int mtu;
 
-		mtu = tdev->mtu - t_hlen;
-		if (mtu < IPV6_MIN_MTU)
-			mtu = IPV6_MIN_MTU;
-		WRITE_ONCE(dev->mtu, mtu);
+		dev->mtu = tdev->mtu - t_hlen;
+		if (dev->mtu < IPV6_MIN_MTU)
+			dev->mtu = IPV6_MIN_MTU;
 	}
 }
 
@@ -1876,6 +1876,7 @@ static int __net_init sit_init_net(struct net *net)
 	return 0;
 
 err_reg_dev:
+	ipip6_dev_free(sitn->fb_tunnel_dev);
 	free_netdev(sitn->fb_tunnel_dev);
 err_alloc_dev:
 	return err;
