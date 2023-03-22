@@ -254,7 +254,7 @@ static void ima_lsm_free_rule(struct ima_rule_entry *entry)
 	int i;
 
 	for (i = 0; i < MAX_LSM_RULES; i++) {
-		ima_filter_rule_free(entry->lsm[i].rule);
+		security_filter_rule_free(entry->lsm[i].rule);
 		kfree(entry->lsm[i].args_p);
 	}
 	kfree(entry);
@@ -286,9 +286,10 @@ static struct ima_rule_entry *ima_lsm_copy_rule(struct ima_rule_entry *entry)
 		if (!nentry->lsm[i].args_p)
 			goto out_err;
 
-		ima_filter_rule_init(nentry->lsm[i].type, Audit_equal,
-				     nentry->lsm[i].args_p,
-				     &nentry->lsm[i].rule);
+		security_filter_rule_init(nentry->lsm[i].type,
+					  Audit_equal,
+					  nentry->lsm[i].args_p,
+					  &nentry->lsm[i].rule);
 		if (!nentry->lsm[i].rule)
 			pr_warn("rule for LSM \'%s\' is undefined\n",
 				(char *)entry->lsm[i].args_p);
@@ -370,9 +371,6 @@ static bool ima_match_rules(struct ima_rule_entry *rule, struct inode *inode,
 			    enum ima_hooks func, int mask)
 {
 	int i;
-	bool result = false;
-	struct ima_rule_entry *lsm_rule = rule;
-	bool rule_reinitialized = false;
 
 	if (func == KEXEC_CMDLINE) {
 		if ((rule->flags & IMA_FUNC) && (rule->func == func))
@@ -416,55 +414,36 @@ static bool ima_match_rules(struct ima_rule_entry *rule, struct inode *inode,
 		int rc = 0;
 		u32 osid;
 
-		if (!lsm_rule->lsm[i].rule) {
-			if (!lsm_rule->lsm[i].args_p)
+		if (!rule->lsm[i].rule) {
+			if (!rule->lsm[i].args_p)
 				continue;
 			else
 				return false;
 		}
-
-retry:
 		switch (i) {
 		case LSM_OBJ_USER:
 		case LSM_OBJ_ROLE:
 		case LSM_OBJ_TYPE:
 			security_inode_getsecid(inode, &osid);
-			rc = ima_filter_rule_match(osid, lsm_rule->lsm[i].type,
-						   Audit_equal,
-						   lsm_rule->lsm[i].rule);
+			rc = security_filter_rule_match(osid,
+							rule->lsm[i].type,
+							Audit_equal,
+							rule->lsm[i].rule);
 			break;
 		case LSM_SUBJ_USER:
 		case LSM_SUBJ_ROLE:
 		case LSM_SUBJ_TYPE:
-			rc = ima_filter_rule_match(secid, lsm_rule->lsm[i].type,
-						   Audit_equal,
-						   lsm_rule->lsm[i].rule);
-			break;
+			rc = security_filter_rule_match(secid,
+							rule->lsm[i].type,
+							Audit_equal,
+							rule->lsm[i].rule);
 		default:
 			break;
 		}
-
-		if (rc == -ESTALE && !rule_reinitialized) {
-			lsm_rule = ima_lsm_copy_rule(rule);
-			if (lsm_rule) {
-				rule_reinitialized = true;
-				goto retry;
-			}
-		}
-		if (!rc) {
-			result = false;
-			goto out;
-		}
+		if (!rc)
+			return false;
 	}
-	result = true;
-
-out:
-	if (rule_reinitialized) {
-		for (i = 0; i < MAX_LSM_RULES; i++)
-			ima_filter_rule_free(lsm_rule->lsm[i].rule);
-		kfree(lsm_rule);
-	}
-	return result;
+	return true;
 }
 
 /*
@@ -690,7 +669,6 @@ void __init ima_init_policy(void)
 		add_rules(default_measurement_rules,
 			  ARRAY_SIZE(default_measurement_rules),
 			  IMA_DEFAULT_POLICY);
-		break;
 	default:
 		break;
 	}
@@ -843,9 +821,10 @@ static int ima_lsm_rule_init(struct ima_rule_entry *entry,
 		return -ENOMEM;
 
 	entry->lsm[lsm_rule].type = audit_type;
-	result = ima_filter_rule_init(entry->lsm[lsm_rule].type, Audit_equal,
-				      entry->lsm[lsm_rule].args_p,
-				      &entry->lsm[lsm_rule].rule);
+	result = security_filter_rule_init(entry->lsm[lsm_rule].type,
+					   Audit_equal,
+					   entry->lsm[lsm_rule].args_p,
+					   &entry->lsm[lsm_rule].rule);
 	if (!entry->lsm[lsm_rule].rule) {
 		pr_warn("rule for LSM \'%s\' is undefined\n",
 			(char *)entry->lsm[lsm_rule].args_p);
@@ -1403,14 +1382,6 @@ int ima_policy_show(struct seq_file *m, void *v)
 
 	rcu_read_lock();
 
-	/* Do not print rules with inactive LSM labels */
-	for (i = 0; i < MAX_LSM_RULES; i++) {
-		if (entry->lsm[i].args_p && !entry->lsm[i].rule) {
-			rcu_read_unlock();
-			return 0;
-		}
-	}
-
 	if (entry->action & MEASURE)
 		seq_puts(m, pt(Opt_measure));
 	if (entry->action & DONT_MEASURE)
@@ -1561,10 +1532,6 @@ bool ima_appraise_signature(enum kernel_read_file_id id)
 	enum ima_hooks func;
 
 	if (id >= READING_MAX_ID)
-		return false;
-
-	if (id == READING_KEXEC_IMAGE && !(ima_appraise & IMA_APPRAISE_ENFORCE)
-	    && security_locked_down(LOCKDOWN_KEXEC))
 		return false;
 
 	func = read_idmap[id] ?: FILE_CHECK;
