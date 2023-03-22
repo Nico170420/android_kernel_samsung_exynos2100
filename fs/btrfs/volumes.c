@@ -354,7 +354,6 @@ void btrfs_free_device(struct btrfs_device *device)
 static void free_fs_devices(struct btrfs_fs_devices *fs_devices)
 {
 	struct btrfs_device *device;
-
 	WARN_ON(fs_devices->opened);
 	while (!list_empty(&fs_devices->devices)) {
 		device = list_entry(fs_devices->devices.next,
@@ -714,47 +713,15 @@ static void pending_bios_fn(struct btrfs_work *work)
 	run_scheduled_bios(device);
 }
 
-/*
- * Check if the device in the path matches the device in the given struct device.
- *
- * Returns:
- *   true  If it is the same device.
- *   false If it is not the same device or on error.
- */
-static bool device_matched(const struct btrfs_device *device, const char *path)
+static bool device_path_matched(const char *path, struct btrfs_device *device)
 {
-	char *device_name;
-	struct block_device *bdev_old;
-	struct block_device *bdev_new;
-
-	/*
-	 * If we are looking for a device with the matching dev_t, then skip
-	 * device without a name (a missing device).
-	 */
-	if (!device->name)
-		return false;
-
-	device_name = kzalloc(BTRFS_PATH_NAME_MAX, GFP_KERNEL);
-	if (!device_name)
-		return false;
+	int found;
 
 	rcu_read_lock();
-	scnprintf(device_name, BTRFS_PATH_NAME_MAX, "%s", rcu_str_deref(device->name));
+	found = strcmp(rcu_str_deref(device->name), path);
 	rcu_read_unlock();
 
-	bdev_old = lookup_bdev(device_name);
-	kfree(device_name);
-	if (IS_ERR(bdev_old))
-		return false;
-
-	bdev_new = lookup_bdev(path);
-	if (IS_ERR(bdev_new))
-		return false;
-
-	if (bdev_old == bdev_new)
-		return true;
-
-	return false;
+	return found == 0;
 }
 
 /*
@@ -775,8 +742,6 @@ static int btrfs_free_stale_devices(const char *path,
 	struct btrfs_device *device, *tmp_device;
 	int ret = 0;
 
-	lockdep_assert_held(&uuid_mutex);
-
 	if (path)
 		ret = -ENOENT;
 
@@ -787,7 +752,9 @@ static int btrfs_free_stale_devices(const char *path,
 					 &fs_devices->devices, dev_list) {
 			if (skip_device && skip_device == device)
 				continue;
-			if (path && !device_matched(device, path))
+			if (path && !device->name)
+				continue;
+			if (path && !device_path_matched(path, device))
 				continue;
 			if (fs_devices->opened) {
 				/* for an already deleted device return 0 */
@@ -1214,12 +1181,11 @@ static struct btrfs_fs_devices *clone_fs_devices(struct btrfs_fs_devices *orig)
 	struct btrfs_device *orig_dev;
 	int ret = 0;
 
-	lockdep_assert_held(&uuid_mutex);
-
 	fs_devices = alloc_fs_devices(orig->fsid, NULL);
 	if (IS_ERR(fs_devices))
 		return fs_devices;
 
+	mutex_lock(&orig->device_list_mutex);
 	fs_devices->total_devices = orig->total_devices;
 
 	list_for_each_entry(orig_dev, &orig->devices, dev_list) {
@@ -1251,8 +1217,10 @@ static struct btrfs_fs_devices *clone_fs_devices(struct btrfs_fs_devices *orig)
 		device->fs_devices = fs_devices;
 		fs_devices->num_devices++;
 	}
+	mutex_unlock(&orig->device_list_mutex);
 	return fs_devices;
 error:
+	mutex_unlock(&orig->device_list_mutex);
 	free_fs_devices(fs_devices);
 	return ERR_PTR(ret);
 }
@@ -1343,13 +1311,8 @@ static void btrfs_close_one_device(struct btrfs_device *device)
 		fs_devices->rw_devices--;
 	}
 
-	if (device->devid == BTRFS_DEV_REPLACE_DEVID)
-		clear_bit(BTRFS_DEV_STATE_REPLACE_TGT, &device->dev_state);
-
-	if (test_bit(BTRFS_DEV_STATE_MISSING, &device->dev_state)) {
-		clear_bit(BTRFS_DEV_STATE_MISSING, &device->dev_state);
+	if (test_bit(BTRFS_DEV_STATE_MISSING, &device->dev_state))
 		fs_devices->missing_devices--;
-	}
 
 	btrfs_close_bdev(device);
 
@@ -1402,17 +1365,6 @@ int btrfs_close_devices(struct btrfs_fs_devices *fs_devices)
 	if (!fs_devices->opened) {
 		seed_devices = fs_devices->seed;
 		fs_devices->seed = NULL;
-
-		/*
-		 * If the struct btrfs_fs_devices is not assembled with any
-		 * other device, it can be re-initialized during the next mount
-		 * without the needing device-scan step. Therefore, it can be
-		 * fully freed.
-		 */
-		if (fs_devices->num_devices == 1) {
-			list_del(&fs_devices->fs_list);
-			free_fs_devices(fs_devices);
-		}
 	}
 	mutex_unlock(&uuid_mutex);
 
@@ -1713,7 +1665,7 @@ again:
 			goto out;
 	}
 
-	while (search_start < search_end) {
+	while (1) {
 		l = path->nodes[0];
 		slot = path->slots[0];
 		if (slot >= btrfs_header_nritems(l)) {
@@ -1735,9 +1687,6 @@ again:
 
 		if (key.type != BTRFS_DEV_EXTENT_KEY)
 			goto next;
-
-		if (key.offset > search_end)
-			break;
 
 		if (key.offset > search_start) {
 			hole_size = key.offset - search_start;
@@ -1809,7 +1758,6 @@ next:
 	else
 		ret = 0;
 
-	ASSERT(max_hole_start + max_hole_size <= search_end);
 out:
 	btrfs_free_path(path);
 	*start = max_hole_start;
@@ -2208,11 +2156,8 @@ int btrfs_rm_device(struct btrfs_fs_info *fs_info, const char *device_path,
 	u64 num_devices;
 	int ret = 0;
 
-	/*
-	 * The device list in fs_devices is accessed without locks (neither
-	 * uuid_mutex nor device_list_mutex) as it won't change on a mounted
-	 * filesystem and another device rm cannot run.
-	 */
+	mutex_lock(&uuid_mutex);
+
 	num_devices = btrfs_num_devices(fs_info);
 
 	ret = btrfs_check_raid_min_devices(fs_info, num_devices - 1);
@@ -2256,9 +2201,11 @@ int btrfs_rm_device(struct btrfs_fs_info *fs_info, const char *device_path,
 		mutex_unlock(&fs_info->chunk_mutex);
 	}
 
+	mutex_unlock(&uuid_mutex);
 	ret = btrfs_shrink_device(device, 0);
 	if (!ret)
 		btrfs_reada_remove_dev(device);
+	mutex_lock(&uuid_mutex);
 	if (ret)
 		goto error_undo;
 
@@ -2340,6 +2287,7 @@ int btrfs_rm_device(struct btrfs_fs_info *fs_info, const char *device_path,
 	}
 
 out:
+	mutex_unlock(&uuid_mutex);
 	return ret;
 
 error_undo:
@@ -4366,12 +4314,10 @@ static int balance_kthread(void *data)
 	struct btrfs_fs_info *fs_info = data;
 	int ret = 0;
 
-	sb_start_write(fs_info->sb);
 	mutex_lock(&fs_info->balance_mutex);
 	if (fs_info->balance_ctl)
 		ret = btrfs_balance(fs_info, fs_info->balance_ctl, NULL);
 	mutex_unlock(&fs_info->balance_mutex);
-	sb_end_write(fs_info->sb);
 
 	return ret;
 }
@@ -7429,12 +7375,12 @@ int btrfs_read_chunk_tree(struct btrfs_fs_info *fs_info)
 	 * do another round of validation checks.
 	 */
 	if (total_dev != fs_info->fs_devices->total_devices) {
-		btrfs_warn(fs_info,
-"super block num_devices %llu mismatch with DEV_ITEM count %llu, will be repaired on next transaction commit",
+		btrfs_err(fs_info,
+	   "super_num_devices %llu mismatch with num_devices %llu found here",
 			  btrfs_super_num_devices(fs_info->super_copy),
 			  total_dev);
-		fs_info->fs_devices->total_devices = total_dev;
-		btrfs_set_super_num_devices(fs_info->super_copy, total_dev);
+		ret = -EINVAL;
+		goto error;
 	}
 	if (btrfs_super_total_bytes(fs_info->super_copy) <
 	    fs_info->fs_devices->total_rw_bytes) {

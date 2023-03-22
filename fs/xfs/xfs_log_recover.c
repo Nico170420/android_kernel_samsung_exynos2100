@@ -471,7 +471,7 @@ xlog_find_verify_log_record(
 			xfs_warn(log->l_mp,
 		"Log inconsistent (didn't find previous header)");
 			ASSERT(0);
-			error = -EFSCORRUPTED;
+			error = -EIO;
 			goto out;
 		}
 
@@ -1347,11 +1347,10 @@ xlog_find_tail(
 	error = xlog_rseek_logrec_hdr(log, *head_blk, *head_blk, 1, buffer,
 				      &rhead_blk, &rhead, &wrapped);
 	if (error < 0)
-		goto done;
+		return error;
 	if (!error) {
 		xfs_warn(log->l_mp, "%s: couldn't find sync record", __func__);
-		error = -EFSCORRUPTED;
-		goto done;
+		return -EIO;
 	}
 	*tail_blk = BLOCK_LSN(be64_to_cpu(rhead->h_tail_lsn));
 
@@ -2206,8 +2205,6 @@ xlog_recover_get_buf_lsn(
 	case XFS_ABTC_MAGIC:
 	case XFS_RMAP_CRC_MAGIC:
 	case XFS_REFC_CRC_MAGIC:
-	case XFS_FIBT_CRC_MAGIC:
-	case XFS_FIBT_MAGIC:
 	case XFS_IBT_CRC_MAGIC:
 	case XFS_IBT_MAGIC: {
 		struct xfs_btree_block *btb = blk;
@@ -2579,7 +2576,6 @@ xlog_recover_do_reg_buffer(
 	int			bit;
 	int			nbits;
 	xfs_failaddr_t		fa;
-	const size_t		size_disk_dquot = sizeof(struct xfs_disk_dquot);
 
 	trace_xfs_log_recover_buf_reg_buf(mp->m_log, buf_f);
 
@@ -2622,7 +2618,7 @@ xlog_recover_do_reg_buffer(
 					"XFS: NULL dquot in %s.", __func__);
 				goto next;
 			}
-			if (item->ri_buf[i].i_len < size_disk_dquot) {
+			if (item->ri_buf[i].i_len < sizeof(xfs_disk_dquot_t)) {
 				xfs_alert(mp,
 					"XFS: dquot too small (%d) in %s.",
 					item->ri_buf[i].i_len, __func__);
@@ -3170,7 +3166,7 @@ xlog_recover_inode_pass2(
 		default:
 			xfs_warn(log->l_mp, "%s: Invalid flag", __func__);
 			ASSERT(0);
-			error = -EFSCORRUPTED;
+			error = -EIO;
 			goto out_release;
 		}
 	}
@@ -3251,12 +3247,12 @@ xlog_recover_dquot_pass2(
 	recddq = item->ri_buf[1].i_addr;
 	if (recddq == NULL) {
 		xfs_alert(log->l_mp, "NULL dquot in %s.", __func__);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
-	if (item->ri_buf[1].i_len < sizeof(struct xfs_disk_dquot)) {
+	if (item->ri_buf[1].i_len < sizeof(xfs_disk_dquot_t)) {
 		xfs_alert(log->l_mp, "dquot too small (%d) in %s.",
 			item->ri_buf[1].i_len, __func__);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 
 	/*
@@ -3283,7 +3279,7 @@ xlog_recover_dquot_pass2(
 	if (fa) {
 		xfs_alert(mp, "corrupt dquot ID 0x%x in log at %pS",
 				dq_f->qlf_id, fa);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 	ASSERT(dq_f->qlf_len == 1);
 
@@ -3386,7 +3382,7 @@ xlog_recover_efd_pass2(
 	struct xlog_recover_item	*item)
 {
 	xfs_efd_log_format_t	*efd_formatp;
-	struct xfs_efi_log_item	*efip = NULL;
+	xfs_efi_log_item_t	*efip = NULL;
 	struct xfs_log_item	*lip;
 	uint64_t		efi_id;
 	struct xfs_ail_cursor	cur;
@@ -3407,7 +3403,7 @@ xlog_recover_efd_pass2(
 	lip = xfs_trans_ail_cursor_first(ailp, &cur, 0);
 	while (lip != NULL) {
 		if (lip->li_type == XFS_LI_EFI) {
-			efip = (struct xfs_efi_log_item *)lip;
+			efip = (xfs_efi_log_item_t *)lip;
 			if (efip->efi_format.efi_id == efi_id) {
 				/*
 				 * Drop the EFD reference to the EFI. This
@@ -3541,7 +3537,6 @@ xfs_cui_copy_format(
 		memcpy(dst_cui_fmt, src_cui_fmt, len);
 		return 0;
 	}
-	XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, NULL);
 	return -EFSCORRUPTED;
 }
 
@@ -3606,10 +3601,8 @@ xlog_recover_cud_pass2(
 	struct xfs_ail			*ailp = log->l_ailp;
 
 	cud_formatp = item->ri_buf[0].i_addr;
-	if (item->ri_buf[0].i_len != sizeof(struct xfs_cud_log_format)) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
+	if (item->ri_buf[0].i_len != sizeof(struct xfs_cud_log_format))
 		return -EFSCORRUPTED;
-	}
 	cui_id = cud_formatp->cud_cui_id;
 
 	/*
@@ -3661,7 +3654,6 @@ xfs_bui_copy_format(
 		memcpy(dst_bui_fmt, src_bui_fmt, len);
 		return 0;
 	}
-	XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, NULL);
 	return -EFSCORRUPTED;
 }
 
@@ -3685,10 +3677,8 @@ xlog_recover_bui_pass2(
 
 	bui_formatp = item->ri_buf[0].i_addr;
 
-	if (bui_formatp->bui_nextents != XFS_BUI_MAX_FAST_EXTENTS) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
+	if (bui_formatp->bui_nextents != XFS_BUI_MAX_FAST_EXTENTS)
 		return -EFSCORRUPTED;
-	}
 	buip = xfs_bui_init(mp);
 	error = xfs_bui_copy_format(&item->ri_buf[0], &buip->bui_format);
 	if (error) {
@@ -3730,10 +3720,8 @@ xlog_recover_bud_pass2(
 	struct xfs_ail			*ailp = log->l_ailp;
 
 	bud_formatp = item->ri_buf[0].i_addr;
-	if (item->ri_buf[0].i_len != sizeof(struct xfs_bud_log_format)) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
+	if (item->ri_buf[0].i_len != sizeof(struct xfs_bud_log_format))
 		return -EFSCORRUPTED;
-	}
 	bui_id = bud_formatp->bud_bui_id;
 
 	/*
@@ -4030,7 +4018,7 @@ xlog_recover_commit_pass1(
 		xfs_warn(log->l_mp, "%s: invalid item type (%d)",
 			__func__, ITEM_TYPE(item));
 		ASSERT(0);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 }
 
@@ -4078,7 +4066,7 @@ xlog_recover_commit_pass2(
 		xfs_warn(log->l_mp, "%s: invalid item type (%d)",
 			__func__, ITEM_TYPE(item));
 		ASSERT(0);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 }
 
@@ -4199,7 +4187,7 @@ xlog_recover_add_to_cont_trans(
 		ASSERT(len <= sizeof(struct xfs_trans_header));
 		if (len > sizeof(struct xfs_trans_header)) {
 			xfs_warn(log->l_mp, "%s: bad header length", __func__);
-			return -EFSCORRUPTED;
+			return -EIO;
 		}
 
 		xlog_recover_add_item(&trans->r_itemq);
@@ -4255,13 +4243,13 @@ xlog_recover_add_to_trans(
 			xfs_warn(log->l_mp, "%s: bad header magic number",
 				__func__);
 			ASSERT(0);
-			return -EFSCORRUPTED;
+			return -EIO;
 		}
 
 		if (len > sizeof(struct xfs_trans_header)) {
 			xfs_warn(log->l_mp, "%s: bad header length", __func__);
 			ASSERT(0);
-			return -EFSCORRUPTED;
+			return -EIO;
 		}
 
 		/*
@@ -4297,7 +4285,7 @@ xlog_recover_add_to_trans(
 				  in_f->ilf_size);
 			ASSERT(0);
 			kmem_free(ptr);
-			return -EFSCORRUPTED;
+			return -EIO;
 		}
 
 		item->ri_total = in_f->ilf_size;
@@ -4305,16 +4293,7 @@ xlog_recover_add_to_trans(
 			kmem_zalloc(item->ri_total * sizeof(xfs_log_iovec_t),
 				    0);
 	}
-
-	if (item->ri_total <= item->ri_cnt) {
-		xfs_warn(log->l_mp,
-	"log item region count (%d) overflowed size (%d)",
-				item->ri_cnt, item->ri_total);
-		ASSERT(0);
-		kmem_free(ptr);
-		return -EFSCORRUPTED;
-	}
-
+	ASSERT(item->ri_total > item->ri_cnt);
 	/* Description region is ri_buf[0] */
 	item->ri_buf[item->ri_cnt].i_addr = ptr;
 	item->ri_buf[item->ri_cnt].i_len  = len;
@@ -4401,7 +4380,7 @@ xlog_recovery_process_trans(
 	default:
 		xfs_warn(log->l_mp, "%s: bad flag 0x%x", __func__, flags);
 		ASSERT(0);
-		error = -EFSCORRUPTED;
+		error = -EIO;
 		break;
 	}
 	if (error || freeit)
@@ -4481,7 +4460,7 @@ xlog_recover_process_ophdr(
 		xfs_warn(log->l_mp, "%s: bad clientid 0x%x",
 			__func__, ohead->oh_clientid);
 		ASSERT(0);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 
 	/*
@@ -4491,7 +4470,7 @@ xlog_recover_process_ophdr(
 	if (dp + len > end) {
 		xfs_warn(log->l_mp, "%s: bad length 0x%x", __func__, len);
 		WARN_ON(1);
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 
 	trans = xlog_recover_ophdr_to_trans(rhash, rhead, ohead);
@@ -4587,9 +4566,9 @@ xlog_recover_process_data(
 /* Recover the EFI if necessary. */
 STATIC int
 xlog_recover_process_efi(
+	struct xfs_mount		*mp,
 	struct xfs_ail			*ailp,
-	struct xfs_log_item		*lip,
-	struct list_head		*capture_list)
+	struct xfs_log_item		*lip)
 {
 	struct xfs_efi_log_item		*efip;
 	int				error;
@@ -4602,7 +4581,7 @@ xlog_recover_process_efi(
 		return 0;
 
 	spin_unlock(&ailp->ail_lock);
-	error = xfs_efi_recover(efip, capture_list);
+	error = xfs_efi_recover(mp, efip);
 	spin_lock(&ailp->ail_lock);
 
 	return error;
@@ -4627,9 +4606,9 @@ xlog_recover_cancel_efi(
 /* Recover the RUI if necessary. */
 STATIC int
 xlog_recover_process_rui(
+	struct xfs_mount		*mp,
 	struct xfs_ail			*ailp,
-	struct xfs_log_item		*lip,
-	struct list_head		*capture_list)
+	struct xfs_log_item		*lip)
 {
 	struct xfs_rui_log_item		*ruip;
 	int				error;
@@ -4642,7 +4621,7 @@ xlog_recover_process_rui(
 		return 0;
 
 	spin_unlock(&ailp->ail_lock);
-	error = xfs_rui_recover(ruip, capture_list);
+	error = xfs_rui_recover(mp, ruip);
 	spin_lock(&ailp->ail_lock);
 
 	return error;
@@ -4667,9 +4646,9 @@ xlog_recover_cancel_rui(
 /* Recover the CUI if necessary. */
 STATIC int
 xlog_recover_process_cui(
+	struct xfs_trans		*parent_tp,
 	struct xfs_ail			*ailp,
-	struct xfs_log_item		*lip,
-	struct list_head		*capture_list)
+	struct xfs_log_item		*lip)
 {
 	struct xfs_cui_log_item		*cuip;
 	int				error;
@@ -4682,7 +4661,7 @@ xlog_recover_process_cui(
 		return 0;
 
 	spin_unlock(&ailp->ail_lock);
-	error = xfs_cui_recover(cuip, capture_list);
+	error = xfs_cui_recover(parent_tp, cuip);
 	spin_lock(&ailp->ail_lock);
 
 	return error;
@@ -4707,9 +4686,9 @@ xlog_recover_cancel_cui(
 /* Recover the BUI if necessary. */
 STATIC int
 xlog_recover_process_bui(
+	struct xfs_trans		*parent_tp,
 	struct xfs_ail			*ailp,
-	struct xfs_log_item		*lip,
-	struct list_head		*capture_list)
+	struct xfs_log_item		*lip)
 {
 	struct xfs_bui_log_item		*buip;
 	int				error;
@@ -4722,7 +4701,7 @@ xlog_recover_process_bui(
 		return 0;
 
 	spin_unlock(&ailp->ail_lock);
-	error = xfs_bui_recover(buip, capture_list);
+	error = xfs_bui_recover(parent_tp, buip);
 	spin_lock(&ailp->ail_lock);
 
 	return error;
@@ -4761,66 +4740,37 @@ static inline bool xlog_item_is_intent(struct xfs_log_item *lip)
 /* Take all the collected deferred ops and finish them in order. */
 static int
 xlog_finish_defer_ops(
-	struct xfs_mount	*mp,
-	struct list_head	*capture_list)
+	struct xfs_trans	*parent_tp)
 {
-	struct xfs_defer_capture *dfc, *next;
+	struct xfs_mount	*mp = parent_tp->t_mountp;
 	struct xfs_trans	*tp;
-	struct xfs_inode	*ip;
-	int			error = 0;
+	int64_t			freeblks;
+	uint			resblks;
+	int			error;
 
-	list_for_each_entry_safe(dfc, next, capture_list, dfc_list) {
-		struct xfs_trans_res	resv;
+	/*
+	 * We're finishing the defer_ops that accumulated as a result of
+	 * recovering unfinished intent items during log recovery.  We
+	 * reserve an itruncate transaction because it is the largest
+	 * permanent transaction type.  Since we're the only user of the fs
+	 * right now, take 93% (15/16) of the available free blocks.  Use
+	 * weird math to avoid a 64-bit division.
+	 */
+	freeblks = percpu_counter_sum(&mp->m_fdblocks);
+	if (freeblks <= 0)
+		return -ENOSPC;
+	resblks = min_t(int64_t, UINT_MAX, freeblks);
+	resblks = (resblks * 15) >> 4;
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_itruncate, resblks,
+			0, XFS_TRANS_RESERVE, &tp);
+	if (error)
+		return error;
+	/* transfer all collected dfops to this transaction */
+	xfs_defer_move(tp, parent_tp);
 
-		/*
-		 * Create a new transaction reservation from the captured
-		 * information.  Set logcount to 1 to force the new transaction
-		 * to regrant every roll so that we can make forward progress
-		 * in recovery no matter how full the log might be.
-		 */
-		resv.tr_logres = dfc->dfc_logres;
-		resv.tr_logcount = 1;
-		resv.tr_logflags = XFS_TRANS_PERM_LOG_RES;
-
-		error = xfs_trans_alloc(mp, &resv, dfc->dfc_blkres,
-				dfc->dfc_rtxres, XFS_TRANS_RESERVE, &tp);
-		if (error)
-			return error;
-
-		/*
-		 * Transfer to this new transaction all the dfops we captured
-		 * from recovering a single intent item.
-		 */
-		list_del_init(&dfc->dfc_list);
-		xfs_defer_ops_continue(dfc, tp, &ip);
-
-		error = xfs_trans_commit(tp);
-		if (ip) {
-			xfs_iunlock(ip, XFS_ILOCK_EXCL);
-			xfs_irele(ip);
-		}
-		if (error)
-			return error;
-	}
-
-	ASSERT(list_empty(capture_list));
-	return 0;
+	return xfs_trans_commit(tp);
 }
 
-/* Release all the captured defer ops and capture structures in this list. */
-static void
-xlog_abort_defer_ops(
-	struct xfs_mount		*mp,
-	struct list_head		*capture_list)
-{
-	struct xfs_defer_capture	*dfc;
-	struct xfs_defer_capture	*next;
-
-	list_for_each_entry_safe(dfc, next, capture_list, dfc_list) {
-		list_del_init(&dfc->dfc_list);
-		xfs_defer_ops_release(mp, dfc);
-	}
-}
 /*
  * When this is called, all of the log intent items which did not have
  * corresponding log done items should be in the AIL.  What we do now
@@ -4841,23 +4791,35 @@ STATIC int
 xlog_recover_process_intents(
 	struct xlog		*log)
 {
-	LIST_HEAD(capture_list);
+	struct xfs_trans	*parent_tp;
 	struct xfs_ail_cursor	cur;
 	struct xfs_log_item	*lip;
 	struct xfs_ail		*ailp;
-	int			error = 0;
+	int			error;
 #if defined(DEBUG) || defined(XFS_WARN)
 	xfs_lsn_t		last_lsn;
 #endif
 
+	/*
+	 * The intent recovery handlers commit transactions to complete recovery
+	 * for individual intents, but any new deferred operations that are
+	 * queued during that process are held off until the very end. The
+	 * purpose of this transaction is to serve as a container for deferred
+	 * operations. Each intent recovery handler must transfer dfops here
+	 * before its local transaction commits, and we'll finish the entire
+	 * list below.
+	 */
+	error = xfs_trans_alloc_empty(log->l_mp, &parent_tp);
+	if (error)
+		return error;
+
 	ailp = log->l_ailp;
 	spin_lock(&ailp->ail_lock);
+	lip = xfs_trans_ail_cursor_first(ailp, &cur, 0);
 #if defined(DEBUG) || defined(XFS_WARN)
 	last_lsn = xlog_assign_lsn(log->l_curr_cycle, log->l_curr_block);
 #endif
-	for (lip = xfs_trans_ail_cursor_first(ailp, &cur, 0);
-	     lip != NULL;
-	     lip = xfs_trans_ail_cursor_next(ailp, &cur)) {
+	while (lip != NULL) {
 		/*
 		 * We're done when we see something other than an intent.
 		 * There should be no intents left in the AIL now.
@@ -4879,40 +4841,35 @@ xlog_recover_process_intents(
 
 		/*
 		 * NOTE: If your intent processing routine can create more
-		 * deferred ops, you /must/ attach them to the capture list in
-		 * the recover routine or else those subsequent intents will be
+		 * deferred ops, you /must/ attach them to the dfops in this
+		 * routine or else those subsequent intents will get
 		 * replayed in the wrong order!
 		 */
 		switch (lip->li_type) {
 		case XFS_LI_EFI:
-			error = xlog_recover_process_efi(ailp, lip, &capture_list);
+			error = xlog_recover_process_efi(log->l_mp, ailp, lip);
 			break;
 		case XFS_LI_RUI:
-			error = xlog_recover_process_rui(ailp, lip, &capture_list);
+			error = xlog_recover_process_rui(log->l_mp, ailp, lip);
 			break;
 		case XFS_LI_CUI:
-			error = xlog_recover_process_cui(ailp, lip, &capture_list);
+			error = xlog_recover_process_cui(parent_tp, ailp, lip);
 			break;
 		case XFS_LI_BUI:
-			error = xlog_recover_process_bui(ailp, lip, &capture_list);
+			error = xlog_recover_process_bui(parent_tp, ailp, lip);
 			break;
 		}
 		if (error)
-			break;
+			goto out;
+		lip = xfs_trans_ail_cursor_next(ailp, &cur);
 	}
-
+out:
 	xfs_trans_ail_cursor_done(&cur);
 	spin_unlock(&ailp->ail_lock);
-	if (error)
-		goto err;
+	if (!error)
+		error = xlog_finish_defer_ops(parent_tp);
+	xfs_trans_cancel(parent_tp);
 
-	error = xlog_finish_defer_ops(log->l_mp, &capture_list);
-	if (error)
-		goto err;
-
-	return 0;
-err:
-	xlog_abort_defer_ops(log->l_mp, &capture_list);
 	return error;
 }
 
@@ -5215,10 +5172,8 @@ xlog_recover_process(
 		 * If the filesystem is CRC enabled, this mismatch becomes a
 		 * fatal log corruption failure.
 		 */
-		if (xfs_sb_version_hascrc(&log->l_mp->m_sb)) {
-			XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, log->l_mp);
+		if (xfs_sb_version_hascrc(&log->l_mp->m_sb))
 			return -EFSCORRUPTED;
-		}
 	}
 
 	xlog_unpack_data(rhead, dp, log);
@@ -5245,7 +5200,7 @@ xlog_valid_rec_header(
 	    (be32_to_cpu(rhead->h_version) & (~XLOG_VERSION_OKBITS))))) {
 		xfs_warn(log->l_mp, "%s: unrecognised log version (%d).",
 			__func__, be32_to_cpu(rhead->h_version));
-		return -EFSCORRUPTED;
+		return -EIO;
 	}
 
 	/* LR body must have data or it wouldn't have been written */
@@ -5341,12 +5296,8 @@ xlog_do_recovery_pass(
 		"invalid iclog size (%d bytes), using lsunit (%d bytes)",
 					 h_size, log->l_mp->m_logbsize);
 				h_size = log->l_mp->m_logbsize;
-			} else {
-				XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW,
-						log->l_mp);
-				error = -EFSCORRUPTED;
-				goto bread_err1;
-			}
+			} else
+				return -EFSCORRUPTED;
 		}
 
 		if ((be32_to_cpu(rhead->h_version) & XLOG_VERSION_2) &&
