@@ -114,12 +114,23 @@ void irq_domain_free_fwnode(struct fwnode_handle *fwnode)
 }
 EXPORT_SYMBOL_GPL(irq_domain_free_fwnode);
 
-static struct irq_domain *__irq_domain_create(struct fwnode_handle *fwnode,
-					      unsigned int size,
-					      irq_hw_number_t hwirq_max,
-					      int direct_max,
-					      const struct irq_domain_ops *ops,
-					      void *host_data)
+/**
+ * __irq_domain_add() - Allocate a new irq_domain data structure
+ * @fwnode: firmware node for the interrupt controller
+ * @size: Size of linear map; 0 for radix mapping only
+ * @hwirq_max: Maximum number of interrupts supported by controller
+ * @direct_max: Maximum value of direct maps; Use ~0 for no limit; 0 for no
+ *              direct mapping
+ * @ops: domain callbacks
+ * @host_data: Controller private data pointer
+ *
+ * Allocates and initializes an irq_domain structure.
+ * Returns pointer to IRQ domain, or NULL on failure.
+ */
+struct irq_domain *__irq_domain_add(struct fwnode_handle *fwnode, int size,
+				    irq_hw_number_t hwirq_max, int direct_max,
+				    const struct irq_domain_ops *ops,
+				    void *host_data)
 {
 	struct device_node *of_node = to_of_node(fwnode);
 	struct irqchip_fwid *fwid;
@@ -211,44 +222,12 @@ static struct irq_domain *__irq_domain_create(struct fwnode_handle *fwnode,
 	domain->revmap_direct_max_irq = direct_max;
 	irq_domain_check_hierarchy(domain);
 
-	return domain;
-}
-
-static void __irq_domain_publish(struct irq_domain *domain)
-{
 	mutex_lock(&irq_domain_mutex);
 	debugfs_add_domain_dir(domain);
 	list_add(&domain->link, &irq_domain_list);
 	mutex_unlock(&irq_domain_mutex);
 
 	pr_debug("Added domain %s\n", domain->name);
-}
-
-/**
- * __irq_domain_add() - Allocate a new irq_domain data structure
- * @fwnode: firmware node for the interrupt controller
- * @size: Size of linear map; 0 for radix mapping only
- * @hwirq_max: Maximum number of interrupts supported by controller
- * @direct_max: Maximum value of direct maps; Use ~0 for no limit; 0 for no
- *              direct mapping
- * @ops: domain callbacks
- * @host_data: Controller private data pointer
- *
- * Allocates and initializes an irq_domain structure.
- * Returns pointer to IRQ domain, or NULL on failure.
- */
-struct irq_domain *__irq_domain_add(struct fwnode_handle *fwnode, unsigned int size,
-				    irq_hw_number_t hwirq_max, int direct_max,
-				    const struct irq_domain_ops *ops,
-				    void *host_data)
-{
-	struct irq_domain *domain;
-
-	domain = __irq_domain_create(fwnode, size, hwirq_max, direct_max,
-				     ops, host_data);
-	if (domain)
-		__irq_domain_publish(domain);
-
 	return domain;
 }
 EXPORT_SYMBOL_GPL(__irq_domain_add);
@@ -317,6 +296,7 @@ void irq_domain_update_bus_token(struct irq_domain *domain,
 
 	mutex_unlock(&irq_domain_mutex);
 }
+EXPORT_SYMBOL_GPL(irq_domain_update_bus_token);
 
 /**
  * irq_domain_add_simple() - Register an irq_domain and optionally map a range of irqs
@@ -530,9 +510,6 @@ void irq_domain_disassociate(struct irq_domain *domain, unsigned int irq)
 		return;
 
 	hwirq = irq_data->hwirq;
-
-	mutex_lock(&irq_domain_mutex);
-
 	irq_set_status_flags(irq, IRQ_NOREQUEST);
 
 	/* remove chip and handler */
@@ -552,12 +529,10 @@ void irq_domain_disassociate(struct irq_domain *domain, unsigned int irq)
 
 	/* Clear reverse map for this hwirq */
 	irq_domain_clear_mapping(domain, hwirq);
-
-	mutex_unlock(&irq_domain_mutex);
 }
 
-static int irq_domain_associate_locked(struct irq_domain *domain, unsigned int virq,
-				       irq_hw_number_t hwirq)
+int irq_domain_associate(struct irq_domain *domain, unsigned int virq,
+			 irq_hw_number_t hwirq)
 {
 	struct irq_data *irq_data = irq_get_irq_data(virq);
 	int ret;
@@ -570,6 +545,7 @@ static int irq_domain_associate_locked(struct irq_domain *domain, unsigned int v
 	if (WARN(irq_data->domain, "error: virq%i is already associated", virq))
 		return -EINVAL;
 
+	mutex_lock(&irq_domain_mutex);
 	irq_data->hwirq = hwirq;
 	irq_data->domain = domain;
 	if (domain->ops->map) {
@@ -586,6 +562,7 @@ static int irq_domain_associate_locked(struct irq_domain *domain, unsigned int v
 			}
 			irq_data->domain = NULL;
 			irq_data->hwirq = 0;
+			mutex_unlock(&irq_domain_mutex);
 			return ret;
 		}
 
@@ -596,22 +573,11 @@ static int irq_domain_associate_locked(struct irq_domain *domain, unsigned int v
 
 	domain->mapcount++;
 	irq_domain_set_mapping(domain, hwirq, irq_data);
+	mutex_unlock(&irq_domain_mutex);
 
 	irq_clear_status_flags(virq, IRQ_NOREQUEST);
 
 	return 0;
-}
-
-int irq_domain_associate(struct irq_domain *domain, unsigned int virq,
-			 irq_hw_number_t hwirq)
-{
-	int ret;
-
-	mutex_lock(&irq_domain_mutex);
-	ret = irq_domain_associate_locked(domain, virq, hwirq);
-	mutex_unlock(&irq_domain_mutex);
-
-	return ret;
 }
 EXPORT_SYMBOL_GPL(irq_domain_associate);
 
@@ -729,6 +695,12 @@ unsigned int irq_create_mapping_affinity(struct irq_domain *domain,
 	return virq;
 }
 EXPORT_SYMBOL_GPL(irq_create_mapping_affinity);
+
+unsigned int irq_create_mapping(struct irq_domain *host, irq_hw_number_t hwirq)
+{
+	return irq_create_mapping_affinity(host, hwirq, NULL);
+}
+EXPORT_SYMBOL_GPL(irq_create_mapping);
 
 /**
  * irq_create_strict_mappings() - Map a range of hw irqs to fixed linux irqs
@@ -872,8 +844,13 @@ unsigned int irq_create_fwspec_mapping(struct irq_fwspec *fwspec)
 	}
 
 	irq_data = irq_get_irq_data(virq);
-	if (WARN_ON(!irq_data))
+	if (!irq_data) {
+		if (irq_domain_is_hierarchy(domain))
+			irq_domain_free_irqs(virq, 1);
+		else
+			irq_dispose_mapping(virq);
 		return 0;
+	}
 
 	/* Store trigger type */
 	irqd_set_trigger_type(irq_data, type);
@@ -1089,15 +1066,12 @@ struct irq_domain *irq_domain_create_hierarchy(struct irq_domain *parent,
 	struct irq_domain *domain;
 
 	if (size)
-		domain = __irq_domain_create(fwnode, size, size, 0, ops, host_data);
+		domain = irq_domain_create_linear(fwnode, size, ops, host_data);
 	else
-		domain = __irq_domain_create(fwnode, 0, ~0, 0, ops, host_data);
-
+		domain = irq_domain_create_tree(fwnode, ops, host_data);
 	if (domain) {
 		domain->parent = parent;
 		domain->flags |= flags;
-
-		__irq_domain_publish(domain);
 	}
 
 	return domain;

@@ -649,9 +649,6 @@ BPF_CALL_1(bpf_send_signal, u32, sig)
 		return -EPERM;
 	if (unlikely(!nmi_uaccess_okay()))
 		return -EPERM;
-	/* Task should not be pid=1 to avoid kernel panic. */
-	if (unlikely(is_global_init(current)))
-		return -EPERM;
 
 	if (irqs_disabled()) {
 		/* Do an early check on signal validity. Otherwise,
@@ -704,6 +701,8 @@ tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_probe_read_proto;
 	case BPF_FUNC_ktime_get_ns:
 		return &bpf_ktime_get_ns_proto;
+	case BPF_FUNC_ktime_get_boot_ns:
+		return &bpf_ktime_get_boot_ns_proto;
 	case BPF_FUNC_tail_call:
 		return &bpf_tail_call_proto;
 	case BPF_FUNC_get_current_pid_tgid:

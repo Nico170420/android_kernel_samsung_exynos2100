@@ -45,6 +45,7 @@
 #include <linux/uaccess.h>
 
 #include <trace/events/timer.h>
+#include <soc/samsung/debug-snapshot.h>
 
 #include "tick-internal.h"
 
@@ -1578,7 +1579,9 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
 	 */
 	raw_spin_unlock_irqrestore(&cpu_base->lock, flags);
 	trace_hrtimer_expire_entry(timer, now);
+	dbg_snapshot_hrtimer(timer, now, fn, DSS_FLAG_IN);
 	restart = fn(timer);
+	dbg_snapshot_hrtimer(timer, now, fn, DSS_FLAG_OUT);
 	trace_hrtimer_expire_exit(timer);
 	raw_spin_lock_irq(&cpu_base->lock);
 
@@ -2020,7 +2023,6 @@ SYSCALL_DEFINE2(nanosleep, struct __kernel_timespec __user *, rqtp,
 	if (!timespec64_valid(&tu))
 		return -EINVAL;
 
-	current->restart_block.fn = do_no_restart_syscall;
 	current->restart_block.nanosleep.type = rmtp ? TT_NATIVE : TT_NONE;
 	current->restart_block.nanosleep.rmtp = rmtp;
 	return hrtimer_nanosleep(&tu, HRTIMER_MODE_REL, CLOCK_MONOTONIC);
@@ -2041,7 +2043,6 @@ SYSCALL_DEFINE2(nanosleep_time32, struct old_timespec32 __user *, rqtp,
 	if (!timespec64_valid(&tu))
 		return -EINVAL;
 
-	current->restart_block.fn = do_no_restart_syscall;
 	current->restart_block.nanosleep.type = rmtp ? TT_COMPAT : TT_NONE;
 	current->restart_block.nanosleep.compat_rmtp = rmtp;
 	return hrtimer_nanosleep(&tu, HRTIMER_MODE_REL, CLOCK_MONOTONIC);
@@ -2070,6 +2071,7 @@ int hrtimers_prepare_cpu(unsigned int cpu)
 	cpu_base->expires_next = KTIME_MAX;
 	cpu_base->softirq_expires_next = KTIME_MAX;
 	hrtimer_cpu_base_init_expiry_lock(cpu_base);
+	restore_pcpu_tick(cpu);
 	return 0;
 }
 
@@ -2111,6 +2113,7 @@ int hrtimers_dead_cpu(unsigned int scpu)
 	int i;
 
 	BUG_ON(cpu_online(scpu));
+	save_pcpu_tick(scpu);
 	tick_cancel_sched_timer(scpu);
 
 	/*
