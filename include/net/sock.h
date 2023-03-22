@@ -68,6 +68,15 @@
 #include <linux/net_tstamp.h>
 #include <net/smc.h>
 #include <net/l3mdev.h>
+#include <linux/android_kabi.h>
+#include <linux/android_vendor.h>
+
+// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+#define NAP_PROCESS_NAME_LEN	128
+#define NAP_DOMAIN_NAME_LEN		255
+#endif
+// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 
 /*
  * This structure really needs to be cleaned up.
@@ -233,6 +242,25 @@ struct sock_common {
 
 struct bpf_sk_storage;
 
+// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+struct sock_npa_vendor_data {
+	uid_t	knox_uid;
+	pid_t	knox_pid;
+	uid_t	knox_dns_uid;
+	char 	domain_name[NAP_DOMAIN_NAME_LEN];
+	char	process_name[NAP_PROCESS_NAME_LEN];
+	uid_t	knox_puid;
+	pid_t	knox_ppid;
+	char	parent_process_name[NAP_PROCESS_NAME_LEN];
+	pid_t	knox_dns_pid;
+	char 	dns_process_name[NAP_PROCESS_NAME_LEN];
+};
+
+#define SOCK_NPA_VENDOR_DATA_GET(sock) ((struct sock_npa_vendor_data*)((sock)->android_vendor_data1))
+#endif
+// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
+
 /**
   *	struct sock - network layer representation of sockets
   *	@__sk_common: shared layout with inet_timewait_sock
@@ -300,7 +328,7 @@ struct bpf_sk_storage;
   *	@sk_tskey: counter to disambiguate concurrent tstamp requests
   *	@sk_zckey: counter to order MSG_ZEROCOPY notifications
   *	@sk_socket: Identd and reporting IO signals
-  *	@sk_user_data: RPC layer private data. Write-protected by @sk_callback_lock.
+  *	@sk_user_data: RPC layer private data
   *	@sk_frag: cached page frag
   *	@sk_peek_off: current peek_offset value
   *	@sk_send_head: front of stuff to transmit
@@ -399,7 +427,7 @@ struct sock {
 #ifdef CONFIG_XFRM
 	struct xfrm_policy __rcu *sk_policy[2];
 #endif
-	struct dst_entry __rcu	*sk_rx_dst;
+	struct dst_entry	*sk_rx_dst;
 	struct dst_entry __rcu	*sk_dst_cache;
 	atomic_t		sk_omem_alloc;
 	int			sk_sndbuf;
@@ -470,10 +498,8 @@ struct sock {
 	u32			sk_ack_backlog;
 	u32			sk_max_ack_backlog;
 	kuid_t			sk_uid;
-	spinlock_t		sk_peer_lock;
 	struct pid		*sk_peer_pid;
 	const struct cred	*sk_peer_cred;
-
 	long			sk_rcvtimeo;
 	ktime_t			sk_stamp;
 #if BITS_PER_LONG==32
@@ -513,6 +539,17 @@ struct sock {
 	struct bpf_sk_storage __rcu	*sk_bpf_storage;
 #endif
 	struct rcu_head		sk_rcu;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
+
+	ANDROID_VENDOR_DATA(1);
 };
 
 enum sk_pacing {
@@ -821,6 +858,9 @@ enum sock_flags {
 	SOCK_TXTIME,
 	SOCK_XDP, /* XDP is attached */
 	SOCK_TSTAMP_NEW, /* Indicates 64 bit timestamps always */
+#ifdef CONFIG_MPTCP
+	SOCK_MPTCP, /* MPTCP set on this socket */
+#endif
 };
 
 #define SK_FLAGS_TIMESTAMP ((1UL << SOCK_TIMESTAMP) | (1UL << SOCK_TIMESTAMPING_RX_SOFTWARE))
@@ -1133,7 +1173,9 @@ struct proto {
 	void			(*unhash)(struct sock *sk);
 	void			(*rehash)(struct sock *sk);
 	int			(*get_port)(struct sock *sk, unsigned short snum);
-
+#ifdef CONFIG_MPTCP
+	void			(*clear_sk)(struct sock *sk, int size);
+#endif
 	/* Keeping track of sockets in use */
 #ifdef CONFIG_PROC_FS
 	unsigned int		inuse_idx;
@@ -1400,7 +1442,7 @@ void __sk_mem_reclaim(struct sock *sk, int amount);
 /* sysctl_mem values are in pages, we convert them in SK_MEM_QUANTUM units */
 static inline long sk_prot_mem_limits(const struct sock *sk, int index)
 {
-	long val = READ_ONCE(sk->sk_prot->sysctl_mem[index]);
+	long val = sk->sk_prot->sysctl_mem[index];
 
 #if PAGE_SIZE > SK_MEM_QUANTUM
 	val <<= PAGE_SHIFT - SK_MEM_QUANTUM_SHIFT;
@@ -1706,12 +1748,7 @@ void sk_common_release(struct sock *sk);
  *	Default socket callbacks and setup code
  */
 
-/* Initialise core socket variables using an explicit uid. */
-void sock_init_data_uid(struct socket *sock, struct sock *sk, kuid_t uid);
-
-/* Initialise core socket variables.
- * Assumes struct socket *sock is embedded in a struct socket_alloc.
- */
+/* Initialise core socket variables */
 void sock_init_data(struct socket *sock, struct sock *sk);
 
 /*
@@ -2172,25 +2209,10 @@ static inline __must_check bool skb_set_owner_sk_safe(struct sk_buff *skb, struc
 	return false;
 }
 
-static inline struct sk_buff *skb_clone_and_charge_r(struct sk_buff *skb, struct sock *sk)
-{
-	skb = skb_clone(skb, sk_gfp_mask(sk, GFP_ATOMIC));
-	if (skb) {
-		if (sk_rmem_schedule(sk, skb, skb->truesize)) {
-			skb_set_owner_r(skb, sk);
-			return skb;
-		}
-		__kfree_skb(skb);
-	}
-	return NULL;
-}
-
 void sk_reset_timer(struct sock *sk, struct timer_list *timer,
 		    unsigned long expires);
 
 void sk_stop_timer(struct sock *sk, struct timer_list *timer);
-
-void sk_stop_timer_sync(struct sock *sk, struct timer_list *timer);
 
 int __sk_queue_drop_skb(struct sock *sk, struct sk_buff_head *sk_queue,
 			struct sk_buff *skb, unsigned int flags,
@@ -2603,9 +2625,6 @@ extern int sysctl_optmem_max;
 extern __u32 sysctl_wmem_default;
 extern __u32 sysctl_rmem_default;
 
-
-/* On 32bit arches, an skb frag is limited to 2^15 */
-#define SKB_FRAG_PAGE_ORDER	get_order(32768)
 DECLARE_STATIC_KEY_FALSE(net_high_order_alloc_disable_key);
 
 static inline int sk_get_wmem0(const struct sock *sk, const struct proto *proto)
